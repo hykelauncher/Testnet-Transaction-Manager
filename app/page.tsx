@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { AlertCircle, Wallet, Send, Settings, History, Network, ExternalLink, Shield } from "lucide-react"
+import { AlertCircle, Wallet, Send, Settings, History, Network, ExternalLink, Shield, LogOut } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { TeaWeb3Service } from "@/lib/tea-web3"
 import { TeaDashboard } from "@/components/tea-dashboard"
@@ -342,10 +342,38 @@ export default function TestnetManager() {
   const [walletConnected, setWalletConnected] = useState(false)
   const [transactionResult, setTransactionResult] = useState<any>(null)
   const [refreshDashboard, setRefreshDashboard] = useState(0)
+  const [isConnecting, setIsConnecting] = useState(false)
 
   const currentTestnet = testnets.find((t) => t.id === selectedTestnet)
   const currentContract = currentTestnet?.contracts.find((c) => c.name === selectedContract)
   const currentTemplate = transactionTemplates[selectedFunction as keyof typeof transactionTemplates]
+
+  // Auto-restore wallet connection on page load
+  useEffect(() => {
+    const restoreConnection = async () => {
+      setIsConnecting(true)
+      const service = new TeaWeb3Service()
+      const result = await service.loadSavedConnection()
+
+      if (result.success) {
+        setWeb3Service(service)
+        setWalletConnected(true)
+
+        // Auto-select the testnet and contract
+        setSelectedTestnet("tea-sepolia")
+        const contractAddress = service.getCurrentContractAddress()
+        const contract = testnets[0].contracts.find((c) => c.address === contractAddress)
+        if (contract) {
+          setSelectedContract(contract.name)
+        }
+
+        console.log("✅ Wallet connection restored from localStorage")
+      }
+      setIsConnecting(false)
+    }
+
+    restoreConnection()
+  }, [])
 
   // Auto-refresh dashboard after successful transactions (only for TEA)
   useEffect(() => {
@@ -438,17 +466,20 @@ export default function TestnetManager() {
       return
     }
 
+    setIsConnecting(true)
+
     // Only use real Web3 service for TEA testnet
     if (selectedTestnet === "tea-sepolia") {
       // Get the selected contract address
       const contractAddress = currentContract?.address || "0x819436EE4bFc6cc587E01939f9fc60065D1a63DF"
 
       const service = new TeaWeb3Service(contractAddress)
-      const result = await service.connectWallet(privateKey)
+      const result = await service.connectWallet(privateKey, contractAddress, true)
 
       if (result.success) {
         setWeb3Service(service)
         setWalletConnected(true)
+        setPrivateKey("") // Clear the input for security
         setTransactionResult({
           success: true,
           data: `Wallet connected successfully!\nAddress: ${result.walletAddress}\nNetwork: ${result.networkInfo?.name} (Chain ID: ${result.networkInfo?.chainId})\nContract: ${currentContract?.name || "TEA Staking 2.0"} (${service.getContractVersion()})`,
@@ -462,6 +493,22 @@ export default function TestnetManager() {
       setWalletConnected(true)
       setTransactionResult({ success: true, data: `Mock wallet connected for ${currentTestnet?.name}` })
     }
+
+    setIsConnecting(false)
+  }
+
+  const handleDisconnectWallet = () => {
+    if (web3Service) {
+      web3Service.disconnectWallet()
+    }
+    setWeb3Service(null)
+    setWalletConnected(false)
+    setPrivateKey("")
+    setTransactionResult(null)
+    setSelectedTestnet("")
+    setSelectedContract("")
+    setSelectedFunction("")
+    console.log("🔌 Wallet disconnected")
   }
 
   // Add effect to handle contract switching
@@ -596,16 +643,16 @@ export default function TestnetManager() {
                       />
                       <Button
                         onClick={handleConnectWallet}
-                        disabled={!privateKey || !selectedTestnet}
+                        disabled={!privateKey || !selectedTestnet || isConnecting}
                         className="w-full"
                       >
-                        Connect Wallet
+                        {isConnecting ? "Connecting..." : "Connect Wallet"}
                       </Button>
                       <Alert>
                         <AlertCircle className="h-4 w-4" />
                         <AlertDescription className="text-xs">
                           {isTeaTestnet
-                            ? "Never share your private key. This is for testnet use only."
+                            ? "Never share your private key. This is for testnet use only. Connection will be saved for convenience."
                             : "Mock connection for demo purposes. Select TEA testnet for real transactions."}
                         </AlertDescription>
                       </Alert>
@@ -614,11 +661,21 @@ export default function TestnetManager() {
                   ) : (
                     <>
                       {isTeaTestnet ? (
-                        <WalletInfo web3Service={web3Service} walletConnected={walletConnected} />
+                        <div className="space-y-3">
+                          <WalletInfo web3Service={web3Service} walletConnected={walletConnected} />
+                          <Button onClick={handleDisconnectWallet} variant="outline" size="sm" className="w-full">
+                            <LogOut className="h-4 w-4 mr-2" />
+                            Disconnect Wallet
+                          </Button>
+                        </div>
                       ) : (
                         <div className="p-3 bg-slate-50 rounded-lg">
                           <Badge variant="outline">Mock Wallet Connected</Badge>
                           <p className="text-sm text-slate-600 mt-2">Connected to {currentTestnet?.name} (Demo Mode)</p>
+                          <Button onClick={handleDisconnectWallet} variant="outline" size="sm" className="w-full mt-2">
+                            <LogOut className="h-4 w-4 mr-2" />
+                            Disconnect
+                          </Button>
                         </div>
                       )}
                     </>
@@ -724,7 +781,8 @@ export default function TestnetManager() {
                             {selectedFunction === "runMultipleTransactions" && (
                               <div className="mt-2 text-xs text-blue-800 bg-blue-100 p-2 rounded">
                                 🎯 Generate human-like transaction patterns with randomized timing, amounts, and
-                                realistic behavior to avoid bot detection
+                                realistic behavior to avoid bot detection. Plans are saved and will resume even after
+                                page refresh!
                               </div>
                             )}
                           </div>

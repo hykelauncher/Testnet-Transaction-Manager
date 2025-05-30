@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { AlertCircle, RefreshCw, CheckCircle, XCircle, Timer } from "lucide-react"
+import { AlertCircle, RefreshCw, CheckCircle, XCircle, Timer, Play, Pause, Square } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import type { TeaWeb3Service } from "@/lib/tea-web3"
 
@@ -27,6 +27,38 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
   const [countdown, setCountdown] = useState(0)
   const [executionStatus, setExecutionStatus] = useState<"idle" | "running" | "paused" | "completed" | "failed">("idle")
 
+  // Load saved execution plan on component mount
+  useEffect(() => {
+    if (walletConnected && web3Service) {
+      const walletAddress = web3Service.getWalletAddress()
+      const savedPlan = web3Service.loadExecutionPlan(walletAddress)
+
+      if (savedPlan && savedPlan.status !== "completed") {
+        setTransactionPlan(savedPlan)
+        setCurrentTransactionIndex(savedPlan.currentIndex || 0)
+        setExecutionStatus(savedPlan.status)
+
+        if (savedPlan.status === "executing" || savedPlan.status === "running") {
+          // Resume execution if it was running
+          setIsExecuting(true)
+          console.log("📂 Resumed execution plan from localStorage")
+        }
+      }
+    }
+  }, [walletConnected, web3Service])
+
+  // Save execution plan whenever it changes
+  useEffect(() => {
+    if (transactionPlan && web3Service && walletConnected) {
+      const updatedPlan = {
+        ...transactionPlan,
+        currentIndex: currentTransactionIndex,
+        status: executionStatus,
+      }
+      web3Service.saveExecutionPlan(updatedPlan)
+    }
+  }, [transactionPlan, currentTransactionIndex, executionStatus, web3Service, walletConnected])
+
   const handleGeneratePlan = async () => {
     if (!web3Service || !walletConnected) return
 
@@ -44,6 +76,8 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
       const result = await web3Service.runMultipleTransactions(validatedStake.toString(), evenTx)
       if (result.success && result.data) {
         setTransactionPlan(result.data)
+        setCurrentTransactionIndex(0)
+        setExecutionStatus("idle")
       } else {
         setTransactionPlan({ error: result.error || "Failed to generate plan" })
       }
@@ -56,12 +90,19 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
 
   const handleApprovePlan = () => {
     if (transactionPlan) {
-      setTransactionPlan({ ...transactionPlan, status: "approved" })
+      const approvedPlan = { ...transactionPlan, status: "approved" }
+      setTransactionPlan(approvedPlan)
+      setExecutionStatus("approved")
     }
   }
 
   const handleRejectPlan = () => {
+    if (web3Service && walletConnected) {
+      web3Service.clearExecutionPlan(web3Service.getWalletAddress())
+    }
     setTransactionPlan(null)
+    setExecutionStatus("idle")
+    setCurrentTransactionIndex(0)
   }
 
   const formatTime = (seconds: number) => {
@@ -91,6 +132,7 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
   const executeCurrentTransaction = async () => {
     if (!transactionPlan || !web3Service || currentTransactionIndex >= transactionPlan.transactionSequence.length) {
       setExecutionStatus("completed")
+      setIsExecuting(false)
       return
     }
 
@@ -127,10 +169,11 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
           executedAt: Date.now(),
         }
 
-        setTransactionPlan({
+        const updatedPlan = {
           ...transactionPlan,
           transactionSequence: updatedSequence,
-        })
+        }
+        setTransactionPlan(updatedPlan)
 
         // Move to next transaction
         const nextIndex = currentTransactionIndex + 1
@@ -140,15 +183,23 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
           setCountdown(nextDelay)
         } else {
           setExecutionStatus("completed")
+          setIsExecuting(false)
           console.log("🎉 All transactions completed!")
+
+          // Clear the saved plan since it's completed
+          if (web3Service) {
+            web3Service.clearExecutionPlan(web3Service.getWalletAddress())
+          }
         }
       } else {
         console.error(`❌ Transaction ${currentTransactionIndex + 1} failed:`, result.error)
         setExecutionStatus("failed")
+        setIsExecuting(false)
       }
     } catch (error: any) {
       console.error(`❌ Transaction ${currentTransactionIndex + 1} error:`, error)
       setExecutionStatus("failed")
+      setIsExecuting(false)
     }
   }
 
@@ -156,20 +207,21 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
     if (!transactionPlan || transactionPlan.transactionSequence.length === 0) return
 
     setExecutionStatus("running")
-    setCurrentTransactionIndex(0)
     setIsExecuting(true)
 
-    // Start with the first transaction's delay
-    const firstDelay = transactionPlan.transactionSequence[0].delay
-    setCountdown(firstDelay)
+    // Start with the current transaction's delay (in case we're resuming)
+    const currentDelay = transactionPlan.transactionSequence[currentTransactionIndex].delay
+    setCountdown(currentDelay)
   }
 
   const pauseExecution = () => {
     setExecutionStatus("paused")
+    setIsExecuting(false)
   }
 
   const resumeExecution = () => {
     setExecutionStatus("running")
+    setIsExecuting(true)
   }
 
   const stopExecution = () => {
@@ -177,6 +229,12 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
     setIsExecuting(false)
     setCurrentTransactionIndex(0)
     setCountdown(0)
+
+    // Clear the saved plan
+    if (web3Service && walletConnected) {
+      web3Service.clearExecutionPlan(web3Service.getWalletAddress())
+    }
+    setTransactionPlan(null)
   }
 
   if (!walletConnected || !web3Service) {
@@ -190,7 +248,9 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
           <RefreshCw className="h-5 w-5" />
           Human-like Transaction Planning
         </CardTitle>
-        <CardDescription>Generate realistic transaction patterns with random intervals</CardDescription>
+        <CardDescription>
+          Generate realistic transaction patterns with random intervals - Plans persist across page refreshes!
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
@@ -205,6 +265,7 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
               const value = Math.max(0.001, Number.parseFloat(e.target.value) || 0.001)
               setTotalStake(value.toString())
             }}
+            disabled={executionStatus === "running" || executionStatus === "paused"}
           />
         </div>
 
@@ -220,6 +281,7 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
             step={2}
             value={[numTransactions]}
             onValueChange={(value) => setNumTransactions(value[0])}
+            disabled={executionStatus === "running" || executionStatus === "paused"}
           />
           <p className="text-xs text-slate-500">
             This will create {numTransactions / 2} stake and {numTransactions / 2} unstake operations with random timing
@@ -227,7 +289,11 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
         </div>
 
         <div className="flex gap-2">
-          <Button onClick={handleGeneratePlan} disabled={isGenerating} className="flex-1">
+          <Button
+            onClick={handleGeneratePlan}
+            disabled={isGenerating || executionStatus === "running" || executionStatus === "paused"}
+            className="flex-1"
+          >
             {isGenerating ? (
               <>
                 <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
@@ -251,44 +317,70 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
             </>
           )}
 
-          {transactionPlan && transactionPlan.status === "approved" && executionStatus === "idle" && (
-            <Button onClick={startExecution} variant="default" size="sm" className="bg-green-600 hover:bg-green-700">
-              <CheckCircle className="h-4 w-4 mr-1" />
-              Start Execution
-            </Button>
-          )}
+          {transactionPlan &&
+            (transactionPlan.status === "approved" || transactionPlan.status === "paused") &&
+            executionStatus !== "running" &&
+            executionStatus !== "completed" && (
+              <Button onClick={startExecution} variant="default" size="sm" className="bg-green-600 hover:bg-green-700">
+                <Play className="h-4 w-4 mr-1" />
+                {executionStatus === "paused" ? "Resume" : "Start"}
+              </Button>
+            )}
 
           {executionStatus === "running" && (
             <>
               <Button onClick={pauseExecution} variant="outline" size="sm">
+                <Pause className="h-4 w-4 mr-1" />
                 Pause
               </Button>
               <Button onClick={stopExecution} variant="destructive" size="sm">
+                <Square className="h-4 w-4 mr-1" />
                 Stop
               </Button>
             </>
           )}
 
-          {executionStatus === "paused" && (
-            <>
-              <Button onClick={resumeExecution} variant="default" size="sm">
-                Resume
-              </Button>
-              <Button onClick={stopExecution} variant="destructive" size="sm">
-                Stop
-              </Button>
-            </>
+          {(executionStatus === "completed" || executionStatus === "failed") && (
+            <Button
+              onClick={() => {
+                setTransactionPlan(null)
+                setExecutionStatus("idle")
+                setCurrentTransactionIndex(0)
+              }}
+              variant="outline"
+              size="sm"
+            >
+              Clear
+            </Button>
           )}
         </div>
 
         {transactionPlan && (
           <div className="mt-4 space-y-4">
-            <Alert className={transactionPlan.status === "approved" ? "border-green-200 bg-green-50" : ""}>
+            <Alert
+              className={
+                transactionPlan.status === "approved" || executionStatus === "running" || executionStatus === "paused"
+                  ? "border-green-200 bg-green-50"
+                  : executionStatus === "completed"
+                    ? "border-blue-200 bg-blue-50"
+                    : executionStatus === "failed"
+                      ? "border-red-200 bg-red-50"
+                      : ""
+              }
+            >
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                {transactionPlan.status === "approved"
-                  ? "✅ Plan approved and ready for execution!"
-                  : "⏳ Plan generated - please review and approve or reject"}
+                {executionStatus === "running"
+                  ? "🔄 Plan is executing - will continue even if you refresh the page!"
+                  : executionStatus === "paused"
+                    ? "⏸️ Plan is paused - you can resume anytime, even after page refresh!"
+                    : executionStatus === "completed"
+                      ? "✅ Plan completed successfully!"
+                      : executionStatus === "failed"
+                        ? "❌ Plan execution failed!"
+                        : transactionPlan.status === "approved"
+                          ? "✅ Plan approved and ready for execution!"
+                          : "⏳ Plan generated - please review and approve or reject"}
               </AlertDescription>
             </Alert>
 
@@ -317,45 +409,51 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
                 </div>
                 <div className="flex justify-between">
                   <span>Status:</span>
-                  <Badge variant={transactionPlan.status === "approved" ? "default" : "secondary"}>
-                    {transactionPlan.status === "approved" ? "Approved" : "Pending Review"}
+                  <Badge
+                    variant={
+                      executionStatus === "running"
+                        ? "default"
+                        : executionStatus === "paused"
+                          ? "secondary"
+                          : executionStatus === "completed"
+                            ? "outline"
+                            : executionStatus === "failed"
+                              ? "destructive"
+                              : transactionPlan.status === "approved"
+                                ? "default"
+                                : "secondary"
+                    }
+                  >
+                    {executionStatus === "running"
+                      ? "Running"
+                      : executionStatus === "paused"
+                        ? "Paused"
+                        : executionStatus === "completed"
+                          ? "Completed"
+                          : executionStatus === "failed"
+                            ? "Failed"
+                            : transactionPlan.status === "approved"
+                              ? "Approved"
+                              : "Pending Review"}
                   </Badge>
                 </div>
               </div>
             </div>
 
-            {(executionStatus === "running" || executionStatus === "paused" || executionStatus === "completed") && (
+            {(executionStatus === "running" ||
+              executionStatus === "paused" ||
+              executionStatus === "completed" ||
+              executionStatus === "failed") && (
               <div className="space-y-2">
                 <h4 className="font-medium">Execution Status</h4>
                 <div className="text-sm space-y-2 p-3 bg-slate-50 rounded-lg">
                   <div className="flex justify-between items-center">
-                    <span>Status:</span>
-                    <Badge
-                      variant={
-                        executionStatus === "running"
-                          ? "default"
-                          : executionStatus === "paused"
-                            ? "secondary"
-                            : executionStatus === "completed"
-                              ? "outline"
-                              : "destructive"
-                      }
-                    >
-                      {executionStatus === "running"
-                        ? "🔄 Running"
-                        : executionStatus === "paused"
-                          ? "⏸️ Paused"
-                          : executionStatus === "completed"
-                            ? "✅ Completed"
-                            : "❌ Failed"}
-                    </Badge>
-                  </div>
-
-                  <div className="flex justify-between items-center">
                     <span>Progress:</span>
                     <span className="font-medium">
-                      {currentTransactionIndex + (executionStatus === "completed" ? 0 : 0)} /{" "}
-                      {transactionPlan.transactionSequence.length}
+                      {executionStatus === "completed"
+                        ? transactionPlan.transactionSequence.length
+                        : currentTransactionIndex}{" "}
+                      / {transactionPlan.transactionSequence.length}
                     </span>
                   </div>
 
@@ -380,6 +478,14 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
                         </div>
                       </div>
                     )}
+
+                  {executionStatus === "paused" && (
+                    <div className="mt-2 p-2 bg-yellow-50 rounded border-l-4 border-yellow-400">
+                      <div className="text-xs font-medium text-yellow-900">
+                        ⏸️ Execution paused. You can resume anytime, even after refreshing the page!
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -395,7 +501,8 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
                     className={`flex items-center justify-between text-sm p-3 rounded border-l-4 ${
                       tx.executed
                         ? "bg-green-50 border-l-green-400"
-                        : index === currentTransactionIndex && executionStatus === "running"
+                        : index === currentTransactionIndex &&
+                            (executionStatus === "running" || executionStatus === "paused")
                           ? "bg-blue-50 border-l-blue-400"
                           : "bg-slate-50 border-l-slate-400"
                     }`}
@@ -405,7 +512,8 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
                         <span className="text-xs font-mono bg-slate-200 px-1 rounded">#{index + 1}</span>
                         {tx.executed ? (
                           <CheckCircle className="h-3 w-3 text-green-500" />
-                        ) : index === currentTransactionIndex && executionStatus === "running" ? (
+                        ) : index === currentTransactionIndex &&
+                          (executionStatus === "running" || executionStatus === "paused") ? (
                           <Timer className="h-3 w-3 text-blue-500 animate-pulse" />
                         ) : (
                           <Timer className="h-3 w-3 text-slate-400" />
@@ -444,6 +552,27 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
             </div>
 
             <div className="space-y-2">
+              <h4 className="font-medium">Persistence Features</h4>
+              <div className="text-xs text-slate-600 space-y-1 p-3 bg-purple-50 rounded-lg">
+                <p>
+                  💾 <strong>Auto-Save:</strong> Plans are automatically saved to your browser
+                </p>
+                <p>
+                  🔄 <strong>Page Refresh Safe:</strong> Execution continues even after refreshing
+                </p>
+                <p>
+                  ⏸️ <strong>Pause & Resume:</strong> Stop and continue execution anytime
+                </p>
+                <p>
+                  📱 <strong>Offline Resilient:</strong> Plans resume when you come back online
+                </p>
+                <p>
+                  🎯 <strong>Smart Recovery:</strong> Automatically detects and resumes interrupted plans
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
               <h4 className="font-medium">Randomization Features</h4>
               <div className="text-xs text-slate-600 space-y-1 p-3 bg-yellow-50 rounded-lg">
                 <p>
@@ -470,16 +599,6 @@ export function MultiTransaction({ web3Service, walletConnected }: MultiTransact
                 <AlertDescription className="text-orange-800">
                   Please review the transaction sequence above. You can approve to proceed or reject to generate a new
                   plan with different randomization.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {transactionPlan.status === "approved" && (
-              <Alert className="bg-green-50 border-green-200">
-                <CheckCircle className="h-4 w-4 text-green-800" />
-                <AlertDescription className="text-green-800">
-                  Plan approved! The execution feature will be implemented in a future update to actually run these
-                  transactions with the specified delays.
                 </AlertDescription>
               </Alert>
             )}

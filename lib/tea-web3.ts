@@ -57,6 +57,17 @@ export interface ConnectionResult {
   networkInfo?: any
 }
 
+export interface ExecutionPlan {
+  id: string
+  totalStake: string
+  numTransactions: number
+  transactionSequence: any[]
+  status: "pending_approval" | "approved" | "executing" | "paused" | "completed" | "failed"
+  currentIndex: number
+  timestamp: number
+  walletAddress: string
+}
+
 export class TeaWeb3Service {
   private provider: ethers.JsonRpcProvider
   private wallet: ethers.Wallet | null = null
@@ -93,10 +104,81 @@ export class TeaWeb3Service {
     return this.contractVersion
   }
 
+  // Save wallet connection to localStorage
+  private saveWalletConnection(privateKey: string, contractAddress: string): void {
+    const connectionData = {
+      privateKey,
+      contractAddress,
+      timestamp: Date.now(),
+    }
+    localStorage.setItem("tea_wallet_connection", JSON.stringify(connectionData))
+  }
+
+  // Load wallet connection from localStorage
+  loadSavedConnection(): Promise<ConnectionResult> {
+    return new Promise((resolve) => {
+      try {
+        const savedConnection = localStorage.getItem("tea_wallet_connection")
+        if (savedConnection) {
+          const { privateKey, contractAddress } = JSON.parse(savedConnection)
+          console.log("🔄 Restoring saved wallet connection...")
+          this.connectWallet(privateKey, contractAddress, false).then(resolve)
+        } else {
+          resolve({ success: false, error: "No saved connection found" })
+        }
+      } catch (error) {
+        console.error("Failed to load saved connection:", error)
+        resolve({ success: false, error: "Failed to load saved connection" })
+      }
+    })
+  }
+
+  // Clear saved wallet connection
+  clearSavedConnection(): void {
+    localStorage.removeItem("tea_wallet_connection")
+    this.wallet = null
+    this.stakingContract = null
+  }
+
+  // Save execution plan to localStorage
+  saveExecutionPlan(plan: ExecutionPlan): void {
+    try {
+      localStorage.setItem(`tea_execution_plan_${plan.walletAddress}`, JSON.stringify(plan))
+      console.log("💾 Execution plan saved to localStorage")
+    } catch (error) {
+      console.error("Failed to save execution plan:", error)
+    }
+  }
+
+  // Load execution plan from localStorage
+  loadExecutionPlan(walletAddress: string): ExecutionPlan | null {
+    try {
+      const savedPlan = localStorage.getItem(`tea_execution_plan_${walletAddress}`)
+      if (savedPlan) {
+        const plan = JSON.parse(savedPlan)
+        console.log("📂 Loaded execution plan from localStorage")
+        return plan
+      }
+    } catch (error) {
+      console.error("Failed to load execution plan:", error)
+    }
+    return null
+  }
+
+  // Clear execution plan from localStorage
+  clearExecutionPlan(walletAddress: string): void {
+    localStorage.removeItem(`tea_execution_plan_${walletAddress}`)
+  }
+
   // Update the connectWallet method to use the correct ABI
-  async connectWallet(privateKey: string): Promise<ConnectionResult> {
+  async connectWallet(privateKey: string, contractAddress?: string, saveConnection = true): Promise<ConnectionResult> {
     try {
       console.log("🔄 Attempting to connect to TEA testnet...")
+
+      // Use provided contract address or current one
+      const targetContractAddress = contractAddress || this.currentContractAddress
+      this.currentContractAddress = targetContractAddress
+      this.contractVersion = targetContractAddress === TEA_CONFIG.LEGACY_CONTRACT_ADDRESS ? "v1" : "v2"
 
       // Test provider connection first
       try {
@@ -172,6 +254,11 @@ export class TeaWeb3Service {
         }
       }
 
+      // Save connection to localStorage if requested
+      if (saveConnection) {
+        this.saveWalletConnection(privateKey, this.currentContractAddress)
+      }
+
       return {
         success: true,
         walletAddress: this.wallet.address,
@@ -187,6 +274,18 @@ export class TeaWeb3Service {
         error: error.message || "Unknown connection error",
       }
     }
+  }
+
+  // Disconnect wallet
+  disconnectWallet(): void {
+    console.log("🔌 Disconnecting wallet...")
+    this.clearSavedConnection()
+    if (this.wallet) {
+      this.clearExecutionPlan(this.wallet.address)
+    }
+    this.wallet = null
+    this.stakingContract = null
+    console.log("✅ Wallet disconnected")
   }
 
   async testConnection(): Promise<{ provider: boolean; wallet: boolean; contracts: boolean }> {
@@ -664,6 +763,8 @@ export class TeaWeb3Service {
         totalExecutionTime: `${Math.floor(totalExecutionTime / 60)}m ${totalExecutionTime % 60}s`,
         executionTimeEstimate: `${Math.floor(totalExecutionTime / 60)} minutes ${totalExecutionTime % 60} seconds`,
         status: "pending_approval",
+        currentIndex: 0,
+        walletAddress: this.wallet.address,
       }
 
       console.log("Generated human-like transaction plan:", plan)
