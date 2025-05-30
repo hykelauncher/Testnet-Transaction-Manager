@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ExternalLink, Trash2 } from "lucide-react"
+import { ExternalLink, Trash2, Shield } from "lucide-react"
 import type { TeaWeb3Service } from "@/lib/tea-web3"
 
 interface Transaction {
@@ -24,25 +24,22 @@ interface TransactionHistoryProps {
 export function TransactionHistory({ web3Service, walletConnected }: TransactionHistoryProps) {
   const [transactions, setTransactions] = useState<Transaction[]>([])
 
-  // Load transactions from localStorage on component mount
+  // Load encrypted transactions from secure storage
   useEffect(() => {
     if (walletConnected && web3Service) {
-      const address = web3Service.getWalletAddress()
-      const storedTx = localStorage.getItem(`tea_transactions_${address}`)
-      if (storedTx) {
-        try {
-          setTransactions(JSON.parse(storedTx))
-        } catch (e) {
-          console.error("Failed to parse transaction history:", e)
-        }
+      try {
+        const encryptedTxs = web3Service.getTransactionHistory()
+        setTransactions(encryptedTxs)
+      } catch (e) {
+        console.error("Failed to load encrypted transaction history:", e)
+        setTransactions([])
       }
     }
   }, [walletConnected, web3Service])
 
   const clearHistory = () => {
     if (web3Service) {
-      const address = web3Service.getWalletAddress()
-      localStorage.removeItem(`tea_transactions_${address}`)
+      web3Service.clearTransactionHistory()
       setTransactions([])
     }
   }
@@ -65,6 +62,8 @@ export function TransactionHistory({ web3Service, walletConnected }: Transaction
         return "Unstake TEA"
       case "claimReward":
         return "Claim Rewards"
+      case "getReward":
+        return "Get Rewards (v2)"
       case "getStakedAmount":
         return "Check Staked Amount"
       case "getStakingInfo":
@@ -78,10 +77,20 @@ export function TransactionHistory({ web3Service, walletConnected }: Transaction
     return null
   }
 
+  const securityStatus = web3Service.getSecurityStatus()
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-lg">Transaction History</CardTitle>
+        <CardTitle className="text-lg flex items-center gap-2">
+          Transaction History
+          {securityStatus.encrypted && (
+            <Badge variant="outline" className="text-xs">
+              <Shield className="h-3 w-3 mr-1" />
+              Encrypted
+            </Badge>
+          )}
+        </CardTitle>
         {transactions.length > 0 && (
           <Button variant="ghost" size="sm" onClick={clearHistory}>
             <Trash2 className="h-4 w-4 mr-1" /> Clear
@@ -92,7 +101,7 @@ export function TransactionHistory({ web3Service, walletConnected }: Transaction
         {transactions.length === 0 ? (
           <div className="text-center py-6 text-slate-500">
             <p>No transaction history yet</p>
-            <p className="text-sm">Your transactions will appear here</p>
+            <p className="text-sm">Your encrypted transactions will appear here</p>
           </div>
         ) : (
           <div className="space-y-3 max-h-96 overflow-y-auto">
@@ -121,6 +130,13 @@ export function TransactionHistory({ web3Service, walletConnected }: Transaction
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {securityStatus.encrypted && (
+          <div className="mt-4 p-2 bg-green-50 rounded text-xs text-green-700">
+            <Shield className="h-3 w-3 inline mr-1" />
+            Transaction history is encrypted and stored securely
           </div>
         )}
       </CardContent>

@@ -1,4 +1,5 @@
 import { ethers } from "ethers"
+import { SecureStorage, SecurityUtils } from "./encryption"
 
 // Contract ABIs - different for each version
 export const STAKING_V1_ABI = [
@@ -68,12 +69,21 @@ export interface ExecutionPlan {
   walletAddress: string
 }
 
+export interface SecureConnectionData {
+  contractAddress: string
+  timestamp: number
+  sessionToken: string
+  walletAddress: string
+  // Private key is encrypted separately
+}
+
 export class TeaWeb3Service {
   private provider: ethers.JsonRpcProvider
   private wallet: ethers.Wallet | null = null
   private stakingContract: ethers.Contract | null = null
   private currentContractAddress: string = TEA_CONFIG.CONTRACT_ADDRESS
   private contractVersion: "v1" | "v2" = "v2"
+  private sessionToken: string | null = null
 
   constructor(contractAddress?: string) {
     this.provider = new ethers.JsonRpcProvider(TEA_CONFIG.RPC_URL)
@@ -81,6 +91,17 @@ export class TeaWeb3Service {
       this.currentContractAddress = contractAddress
       // Determine version based on address
       this.contractVersion = contractAddress === TEA_CONFIG.LEGACY_CONTRACT_ADDRESS ? "v1" : "v2"
+    }
+
+    // Verify encryption integrity on startup
+    if (!SecureStorage.verifyIntegrity()) {
+      console.warn("⚠️ Encryption integrity check failed - clearing stored data")
+      this.clearAllSecureData()
+    }
+
+    // Check if running in secure context
+    if (!SecurityUtils.isSecureContext()) {
+      console.warn("⚠️ Not running in secure context (HTTPS) - encryption may be less effective")
     }
   }
 
@@ -104,59 +125,142 @@ export class TeaWeb3Service {
     return this.contractVersion
   }
 
-  // Save wallet connection to localStorage
+  // Securely save wallet connection with strong encryption
   private saveWalletConnection(privateKey: string, contractAddress: string): void {
-    const connectionData = {
-      privateKey,
-      contractAddress,
-      timestamp: Date.now(),
+    try {
+      // Generate session token for this connection
+      this.sessionToken = SecurityUtils.generateSessionToken()
+
+      // Create connection metadata (non-sensitive)
+      const connectionData: SecureConnectionData = {
+        contractAddress,
+        timestamp: Date.now(),
+        sessionToken: this.sessionToken,
+        walletAddress: this.wallet?.address || "",
+      }
+
+      // Store connection metadata securely
+      SecureStorage.setSecureItem("tea_wallet_connection", connectionData)
+
+      // Store private key with maximum security
+      SecureStorage.setSecureItem("tea_wallet_key", {
+        key: privateKey,
+        sessionToken: this.sessionToken,
+        timestamp: Date.now(),
+      })
+
+      console.log("🔐 Wallet connection saved with strong encryption")
+    } catch (error) {
+      console.error("Failed to save wallet connection securely:", error)
+      throw new Error("Failed to securely store wallet connection")
     }
-    localStorage.setItem("tea_wallet_connection", JSON.stringify(connectionData))
   }
 
-  // Load wallet connection from localStorage
+  // Load wallet connection with decryption and validation
   loadSavedConnection(): Promise<ConnectionResult> {
     return new Promise((resolve) => {
       try {
-        const savedConnection = localStorage.getItem("tea_wallet_connection")
-        if (savedConnection) {
-          const { privateKey, contractAddress } = JSON.parse(savedConnection)
-          console.log("🔄 Restoring saved wallet connection...")
-          this.connectWallet(privateKey, contractAddress, false).then(resolve)
-        } else {
+        console.log("🔍 Checking for saved wallet connection...")
+
+        // Load connection metadata
+        const connectionData = SecureStorage.getSecureItem("tea_wallet_connection")
+        if (!connectionData) {
           resolve({ success: false, error: "No saved connection found" })
+          return
         }
+
+        // Load encrypted private key
+        const keyData = SecureStorage.getSecureItem("tea_wallet_key")
+        if (!keyData) {
+          console.warn("Connection metadata found but private key missing - clearing data")
+          this.clearSavedConnection()
+          resolve({ success: false, error: "Incomplete connection data" })
+          return
+        }
+
+        // Validate session tokens match
+        if (connectionData.sessionToken !== keyData.sessionToken) {
+          console.warn("Session token mismatch - clearing potentially corrupted data")
+          this.clearSavedConnection()
+          resolve({ success: false, error: "Session validation failed" })
+          return
+        }
+
+        // Check if connection is not too old (24 hours)
+        const maxAge = 24 * 60 * 60 * 1000 // 24 hours
+        if (Date.now() - connectionData.timestamp > maxAge) {
+          console.log("Saved connection expired - clearing data")
+          this.clearSavedConnection()
+          resolve({ success: false, error: "Connection expired" })
+          return
+        }
+
+        // Validate private key format
+        if (!SecurityUtils.validatePrivateKey(keyData.key)) {
+          console.error("Invalid private key format in saved data")
+          this.clearSavedConnection()
+          resolve({ success: false, error: "Invalid saved key format" })
+          return
+        }
+
+        console.log("🔄 Restoring encrypted wallet connection...")
+        this.connectWallet(keyData.key, connectionData.contractAddress, false).then((result) => {
+          if (result.success) {
+            this.sessionToken = connectionData.sessionToken
+            console.log("✅ Wallet connection restored successfully")
+          } else {
+            console.error("Failed to restore connection:", result.error)
+            this.clearSavedConnection()
+          }
+          resolve(result)
+        })
       } catch (error) {
         console.error("Failed to load saved connection:", error)
-        resolve({ success: false, error: "Failed to load saved connection" })
+        this.clearSavedConnection()
+        resolve({ success: false, error: "Failed to decrypt saved connection" })
       }
     })
   }
 
-  // Clear saved wallet connection
+  // Clear saved wallet connection securely
   clearSavedConnection(): void {
-    localStorage.removeItem("tea_wallet_connection")
-    this.wallet = null
-    this.stakingContract = null
-  }
-
-  // Save execution plan to localStorage
-  saveExecutionPlan(plan: ExecutionPlan): void {
     try {
-      localStorage.setItem(`tea_execution_plan_${plan.walletAddress}`, JSON.stringify(plan))
-      console.log("💾 Execution plan saved to localStorage")
+      SecureStorage.removeSecureItem("tea_wallet_connection")
+      SecureStorage.removeSecureItem("tea_wallet_key")
+      this.sessionToken = null
+      console.log("🗑️ Saved connection cleared securely")
     } catch (error) {
-      console.error("Failed to save execution plan:", error)
+      console.error("Error clearing saved connection:", error)
     }
   }
 
-  // Load execution plan from localStorage
+  // Clear all secure data
+  clearAllSecureData(): void {
+    try {
+      SecureStorage.clearAllSecureItems()
+      this.sessionToken = null
+      console.log("🗑️ All secure data cleared")
+    } catch (error) {
+      console.error("Error clearing all secure data:", error)
+    }
+  }
+
+  // Save execution plan with encryption
+  saveExecutionPlan(plan: ExecutionPlan): void {
+    try {
+      SecureStorage.setSecureItem(`tea_execution_plan_${plan.walletAddress}`, plan)
+      console.log("💾 Execution plan saved securely")
+    } catch (error) {
+      console.error("Failed to save execution plan securely:", error)
+    }
+  }
+
+  // Load execution plan with decryption
   loadExecutionPlan(walletAddress: string): ExecutionPlan | null {
     try {
-      const savedPlan = localStorage.getItem(`tea_execution_plan_${walletAddress}`)
-      if (savedPlan) {
-        const plan = JSON.parse(savedPlan)
-        console.log("📂 Loaded execution plan from localStorage")
+      const plan = SecureStorage.getSecureItem(`tea_execution_plan_${walletAddress}`)
+      if (plan) {
+        console.log("📂 Loaded execution plan securely")
         return plan
       }
     } catch (error) {
@@ -165,15 +269,23 @@ export class TeaWeb3Service {
     return null
   }
 
-  // Clear execution plan from localStorage
+  // Clear execution plan securely
   clearExecutionPlan(walletAddress: string): void {
-    localStorage.removeItem(`tea_execution_plan_${walletAddress}`)
+    SecureStorage.removeSecureItem(`tea_execution_plan_${walletAddress}`)
   }
 
-  // Update the connectWallet method to use the correct ABI
+  // Update the connectWallet method with enhanced security
   async connectWallet(privateKey: string, contractAddress?: string, saveConnection = true): Promise<ConnectionResult> {
     try {
       console.log("🔄 Attempting to connect to TEA testnet...")
+
+      // Validate private key format first
+      if (!SecurityUtils.validatePrivateKey(privateKey)) {
+        return {
+          success: false,
+          error: "Invalid private key format. Must be 64 characters (32 bytes) hex string.",
+        }
+      }
 
       // Use provided contract address or current one
       const targetContractAddress = contractAddress || this.currentContractAddress
@@ -195,16 +307,9 @@ export class TeaWeb3Service {
         }
       }
 
-      // Validate private key format
+      // Ensure private key has 0x prefix
       if (!privateKey.startsWith("0x")) {
         privateKey = "0x" + privateKey
-      }
-
-      if (privateKey.length !== 66) {
-        return {
-          success: false,
-          error: "Invalid private key format. Must be 64 characters (32 bytes) hex string.",
-        }
       }
 
       // Create wallet
@@ -254,10 +359,13 @@ export class TeaWeb3Service {
         }
       }
 
-      // Save connection to localStorage if requested
+      // Save connection securely if requested
       if (saveConnection) {
         this.saveWalletConnection(privateKey, this.currentContractAddress)
       }
+
+      // Clear the private key from memory (best effort)
+      SecurityUtils.clearSensitiveString(privateKey)
 
       return {
         success: true,
@@ -276,16 +384,24 @@ export class TeaWeb3Service {
     }
   }
 
-  // Disconnect wallet
+  // Enhanced disconnect with secure cleanup
   disconnectWallet(): void {
-    console.log("🔌 Disconnecting wallet...")
+    console.log("🔌 Disconnecting wallet securely...")
+
+    // Clear saved connection data
     this.clearSavedConnection()
+
+    // Clear execution plan if wallet exists
     if (this.wallet) {
       this.clearExecutionPlan(this.wallet.address)
     }
+
+    // Clear wallet and contract references
     this.wallet = null
     this.stakingContract = null
-    console.log("✅ Wallet disconnected")
+    this.sessionToken = null
+
+    console.log("✅ Wallet disconnected securely")
   }
 
   async testConnection(): Promise<{ provider: boolean; wallet: boolean; contracts: boolean }> {
@@ -362,7 +478,7 @@ export class TeaWeb3Service {
       })
       console.log("📤 Transaction sent:", tx.hash)
 
-      // Save to transaction history
+      // Save to transaction history (encrypted)
       this.saveTransaction({
         id: Date.now().toString(),
         hash: tx.hash,
@@ -433,7 +549,7 @@ export class TeaWeb3Service {
 
       console.log("📤 Transaction sent:", tx.hash)
 
-      // Save to transaction history
+      // Save to transaction history (encrypted)
       this.saveTransaction({
         id: Date.now().toString(),
         hash: tx.hash,
@@ -472,7 +588,7 @@ export class TeaWeb3Service {
         })
         console.log("📤 Transaction sent:", tx.hash)
 
-        // Save to transaction history
+        // Save to transaction history (encrypted)
         this.saveTransaction({
           id: Date.now().toString(),
           hash: tx.hash,
@@ -505,7 +621,7 @@ export class TeaWeb3Service {
         })
         console.log("📤 Transaction sent:", tx.hash)
 
-        // Save to transaction history
+        // Save to transaction history (encrypted)
         this.saveTransaction({
           id: Date.now().toString(),
           hash: tx.hash,
@@ -782,6 +898,7 @@ export class TeaWeb3Service {
     }
   }
 
+  // Save transaction history with encryption
   private saveTransaction(transaction: any) {
     if (!this.wallet) return
 
@@ -789,18 +906,41 @@ export class TeaWeb3Service {
     const key = `tea_transactions_${address}`
 
     try {
-      // Get existing transactions
-      const existingTxsString = localStorage.getItem(key)
-      const existingTxs = existingTxsString ? JSON.parse(existingTxsString) : []
+      // Get existing transactions (encrypted)
+      const existingTxs = SecureStorage.getSecureItem(key) || []
 
       // Add new transaction
       const updatedTxs = [transaction, ...existingTxs].slice(0, 50) // Keep only last 50 transactions
 
-      // Save back to localStorage
-      localStorage.setItem(key, JSON.stringify(updatedTxs))
+      // Save back to secure storage
+      SecureStorage.setSecureItem(key, updatedTxs)
     } catch (e) {
-      console.error("Failed to save transaction to history:", e)
+      console.error("Failed to save transaction to encrypted history:", e)
     }
+  }
+
+  // Get transaction history with decryption
+  getTransactionHistory(): any[] {
+    if (!this.wallet) return []
+
+    const address = this.wallet.address
+    const key = `tea_transactions_${address}`
+
+    try {
+      return SecureStorage.getSecureItem(key) || []
+    } catch (e) {
+      console.error("Failed to load encrypted transaction history:", e)
+      return []
+    }
+  }
+
+  // Clear transaction history
+  clearTransactionHistory(): void {
+    if (!this.wallet) return
+
+    const address = this.wallet.address
+    const key = `tea_transactions_${address}`
+    SecureStorage.removeSecureItem(key)
   }
 
   getWalletAddress(): string {
@@ -811,11 +951,27 @@ export class TeaWeb3Service {
     return `${TEA_CONFIG.EXPLORER}/tx/${txHash}`
   }
 
-  getConnectionStatus(): { connected: boolean; address?: string; chainId?: number } {
+  getConnectionStatus(): { connected: boolean; address?: string; chainId?: number; encrypted?: boolean } {
     return {
       connected: !!this.wallet,
       address: this.wallet?.address,
       chainId: TEA_CONFIG.CHAIN_ID,
+      encrypted: !!this.sessionToken, // Indicates if connection is encrypted
+    }
+  }
+
+  // Get security status
+  getSecurityStatus(): {
+    encrypted: boolean
+    secureContext: boolean
+    sessionActive: boolean
+    integrityVerified: boolean
+  } {
+    return {
+      encrypted: !!this.sessionToken,
+      secureContext: SecurityUtils.isSecureContext(),
+      sessionActive: !!this.wallet && !!this.sessionToken,
+      integrityVerified: SecureStorage.verifyIntegrity(),
     }
   }
 }
